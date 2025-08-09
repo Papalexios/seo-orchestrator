@@ -72,17 +72,41 @@ export const generateActionPlan = async (
     const fullAnalysisJson = JSON.stringify(fullAnalysisData, null, 2);
 
     // --- STAGE 1: Generate the reliable skeleton plan ---
-    const skeletonResponse = await withRetry(async () => {
-        const userPrompt = ACTION_PLAN_USER_PROMPT_TEMPLATE.replace('${analysisJson}', fullAnalysisJson);
-        
-        onLog(`Sending request to ${aiConfig.provider} for the plan skeleton...`);
-        const { text } = await callAi(aiConfig, ACTION_PLAN_SKELETON_SYSTEM_INSTRUCTION, userPrompt, { responseMimeType: 'application/json' });
-        
-        onLog(`Received plan skeleton. Validating structure...`);
-        const result = robustJsonParse(text, validateDailyActionPlanSkeleton, 'FullActionPlanSkeleton');
-        onLog('Validated plan skeleton.');
-        return result;
-    });
+    let skeletonResponse: { actionPlan: { day: number; focus: string; actions: ActionItemSkeleton[] }[] };
+    try {
+        skeletonResponse = await withRetry(async () => {
+            const userPrompt = ACTION_PLAN_USER_PROMPT_TEMPLATE.replace('${analysisJson}', fullAnalysisJson);
+
+            onLog(`Sending request to ${aiConfig.provider} for the plan skeleton...`);
+            const { text } = await callAi(aiConfig, ACTION_PLAN_SKELETON_SYSTEM_INSTRUCTION, userPrompt, { responseMimeType: 'application/json', concurrencyStrategy: aiConfig.strategy, ...(aiConfig.stageOverrides?.actionPlan?.model ? { modelOverride: aiConfig.stageOverrides.actionPlan.model } : {}) });
+
+            onLog(`Received plan skeleton. Validating structure...`);
+            const result = robustJsonParse(text, validateDailyActionPlanSkeleton, 'FullActionPlanSkeleton');
+            onLog('Validated plan skeleton.');
+            return result;
+        });
+    } catch (e) {
+        console.error('Action plan skeleton generation failed, falling back to local skeleton:', e);
+        // Fallback: Build a minimal skeleton from available analysis so the app never fails hard
+        const pageActions = seoAnalysis?.pageActions || [];
+        const actions: ActionItemSkeleton[] = pageActions.slice(0, Math.min(24, pageActions.length)).map((a: any, idx: number) => ({
+            id: slugify(a.title || `action-${idx+1}`),
+            title: a.title || `Task ${idx+1}`,
+            type: (a.type as any) || 'content_update',
+            priority: (a.priority as any) || 'medium',
+            impact: typeof a.impact === 'number' ? a.impact : 6,
+            estimatedTime: a.estimatedTime || '1-2 hours',
+            dependencies: Array.isArray(a.dependencies) ? a.dependencies : [],
+        }));
+        const days = Math.max(3, Math.ceil(actions.length / 6));
+        const plan = Array.from({ length: days }, (_, i) => ({
+            day: i + 1,
+            focus: i === 0 ? 'High-Impact Quick Wins' : i === 1 ? 'Content Refresh & Fixes' : 'New Content & Linking',
+            actions: actions.slice(i * 6, (i + 1) * 6),
+        }));
+        skeletonResponse = { actionPlan: plan };
+        onLog('Using fallback local skeleton plan.');
+    }
 
     const skeletonPlan = skeletonResponse.actionPlan;
 
