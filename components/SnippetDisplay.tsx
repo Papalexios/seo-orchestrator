@@ -1,4 +1,3 @@
-
 import React, { useState, useCallback } from 'react';
 import type { SnippetOpportunity } from '../types';
 
@@ -78,7 +77,7 @@ export const SnippetDisplay: React.FC<SnippetDisplayProps> = ({ snippet }) => {
             </div>
             <div>
                 <h4 className="font-semibold text-gray-300 mb-2">Generated JSON-LD Schema</h4>
-                <p className="text-xs text-gray-500 mb-2">Copy this schema and add it to the `<head>` of your page inside a `<script type="application/ld+json">` tag.</p>
+                <p className="text-xs text-gray-500 mb-2">{'Copy this schema and add it to the `<head>` of your page inside a `<script type="application/ld+json">` tag.'}</p>
                 <CodeBlock code={prettyJsonLd} />
             </div>
         </div>
