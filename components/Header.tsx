@@ -65,6 +65,18 @@ export const Header: React.FC<HeaderProps> = ({ onMenuClick, showNewAnalysisButt
             </button>
         </div>
       </div>
+      
+      {/* New prominent CTA */}
+      <div className="mt-8 text-center animate-fade-in" style={{ animationDelay: '200ms' }}>
+        <a 
+          href="https://viral-post.affiliatemarketingforsuccess.com/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-block text-md sm:text-lg font-bold text-white bg-gradient-to-r from-purple-600 via-pink-600 to-red-600 rounded-lg px-6 py-3 sm:px-8 sm:py-4 transition-all duration-300 ease-in-out hover:shadow-2xl hover:shadow-pink-500/40 transform hover:-translate-y-1"
+        >
+          Dominate Your Niche – Unlock Your Complete AI-Powered SEO Arsenal
+        </a>
+      </div>
     </header>
   );
 };

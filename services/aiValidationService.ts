@@ -1,121 +1,216 @@
-
-import { GoogleGenAI } from "@google/genai";
-import OpenAI from 'openai';
-import Anthropic from '@anthropic-ai/sdk';
 import type { AiConfig } from '../types';
-import { withRetry, promiseAny, CustomAggregateError } from '../utils/utility';
 
 interface ValidationResult {
     success: boolean;
     message?: string;
 }
 
-const getErrorMessage = (error: any): string => {
-    const status = error?.status || error?.response?.status;
-    const message = error?.message || error?.error?.message;
-    const lowerMessage = message?.toLowerCase() || '';
+const PROXY_URL = 'https://corsproxy.io/?';
+const TIMEOUT = 15000; // 15 seconds
 
-    if (error instanceof CustomAggregateError) {
-        return "All configured models failed validation. Please check each model name and your API key.";
+/**
+ * A robust, proxied fetcher for API validation. It directly checks HTTP status codes.
+ */
+async function performValidationRequest(
+    url: string,
+    options: RequestInit
+): Promise<{ response: Response; body: any }> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT);
+
+    try {
+        const proxiedUrl = `${PROXY_URL}${encodeURIComponent(url)}`;
+        const response = await fetch(proxiedUrl, {
+            ...options,
+            signal: controller.signal,
+        });
+
+        // Try to parse body regardless of status, as it might contain error details.
+        const body = await response.json().catch(() => response.text());
+
+        return { response, body };
+    } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+            throw new Error(`Request timed out after ${TIMEOUT / 1000} seconds. The service might be down or your network connection is unstable.`);
+        }
+        // This catches network errors, like if the proxy is down.
+        throw new Error(`Network request failed. This could be a CORS issue or a problem with your connection. Please check your network and try again. Error: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+        clearTimeout(timeoutId);
     }
-
-    if (status === 401 || lowerMessage.includes("invalid api key")) return "Authentication failed. The API key is incorrect, expired, or not authorized for the requested model.";
-    if (status === 403) return "Permission denied. Please check your project/organization permissions.";
-    if (status === 429) return "Rate limit exceeded. Please wait a moment or check your plan.";
-    
-    if (lowerMessage.includes('insufficient_quota') || lowerMessage.includes('quota')) return "Your account has insufficient quota. Please check your billing.";
-    if (lowerMessage.includes('model_not_found')) return `The specified model was not found. Please check the model name.`;
-    if (lowerMessage.includes('api key not valid')) return 'The provided API Key is not valid. Please check and try again.';
-
-    if (error instanceof Error && error.name === 'AbortError') return "Request timed out. Please check your network connection.";
-    
-    if (message) return message.split('\n')[0];
-
-    return 'An unknown validation error occurred.';
 }
 
-export const validateApiKey = async (config: AiConfig): Promise<ValidationResult> => {
-    const { provider, apiKey, model, models } = config;
-    if (!apiKey) {
-        return { success: false, message: 'API Key cannot be empty.' };
-    }
-
-    const validationAttempt = async () => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout for each attempt
-
-        try {
-            switch(provider) {
-                case 'gemini': {
-                    const ai = new GoogleGenAI({ apiKey });
-                    const geminiPromise = ai.models.generateContent({
-                        model: 'gemini-2.5-flash',
-                        contents: 'test',
-                    });
-
-                    const abortPromise = new Promise<never>((_, reject) => {
-                        if (controller.signal.aborted) {
-                            reject(new DOMException('Validation timed out', 'AbortError'));
-                        }
-                        controller.signal.addEventListener('abort', () => {
-                            reject(new DOMException('Validation timed out', 'AbortError'));
-                        });
-                    });
-
-                    await Promise.race([geminiPromise, abortPromise]);
-                    break;
-                }
-                case 'openai': {
-                    const client = new OpenAI({ apiKey, dangerouslyAllowBrowser: true });
-                    await client.models.list({ signal: controller.signal });
-                    break;
-                }
-                case 'anthropic': {
-                    const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
-                    await client.messages.create({
-                        model: 'claude-3-haiku-20240307',
-                        messages: [{ role: 'user', content: 'test' }],
-                        max_tokens: 1
-                    }, { signal: controller.signal });
-                    break;
-                }
-                case 'openrouter': {
-                    const client = new OpenAI({
-                        apiKey,
-                        dangerouslyAllowBrowser: true,
-                        baseURL: 'https://corsproxy.io/?' + encodeURIComponent('https://openrouter.ai/api/v1'),
-                        defaultHeaders: {
-                            'HTTP-Referer': 'https://orchestrator.ai',
-                            'X-Title': 'Orchestrator AI',
-                        },
-                    });
-                    const validationModels = (models && models.length > 0)
-                        ? models
-                        : [model || 'mistralai/mistral-7b-instruct'];
-                    
-                    const validationPromises = validationModels.map(m =>
-                        client.chat.completions.create({
-                            model: m,
-                            messages: [{ role: 'user', content: 'test' }],
-                            max_tokens: 1
-                        }, { signal: controller.signal })
-                    );
-                    
-                    await promiseAny(validationPromises);
-                    break;
-                }
-                default:
-                    throw new Error('Unsupported AI provider.');
-            }
-        } finally {
-            clearTimeout(timeoutId);
-        }
+async function validateGemini(apiKey: string): Promise<ValidationResult> {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    const options = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: "test" }] }] }),
     };
 
     try {
-        await validationAttempt();
-        return { success: true };
-    } catch(e) {
-        return { success: false, message: getErrorMessage(e) };
+        const { response, body } = await performValidationRequest(url, options);
+
+        if (response.ok) {
+            return { success: true };
+        }
+
+        // Gemini returns 400 for invalid keys
+        if (response.status === 400 && body?.error?.message?.includes('API key not valid')) {
+            return { success: false, message: 'Invalid API Key. Please check the key and try again.' };
+        }
+        
+        if (response.status === 403) {
+             return { success: false, message: `Permission Denied: ${body?.error?.message || 'Check API permissions in your Google Cloud project.'}` };
+        }
+
+        if (response.status === 429) {
+            return { success: false, message: 'Quota exceeded. Please check your billing or usage limits.' };
+        }
+
+        return { success: false, message: `Validation failed. Status: ${response.status}. Message: ${body?.error?.message || 'Unknown error.'}` };
+
+    } catch (error) {
+        return { success: false, message: error instanceof Error ? error.message : String(error) };
+    }
+}
+
+async function validateOpenAI(apiKey: string): Promise<ValidationResult> {
+    const url = 'https://api.openai.com/v1/models'; // Using a simple GET endpoint is sufficient and cheaper
+    const options = {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+    };
+    
+    try {
+        const { response, body } = await performValidationRequest(url, options);
+
+        if (response.ok) {
+            return { success: true };
+        }
+
+        if (response.status === 401) {
+            return { success: false, message: `Authentication failed. The API key is incorrect or expired. (${body?.error?.code || ''})` };
+        }
+        
+        if (response.status === 429) {
+            return { success: false, message: `Rate limit or quota exceeded. Please check your OpenAI account. (${body?.error?.code || ''})` };
+        }
+
+        return { success: false, message: `Validation failed. Status: ${response.status}. Message: ${body?.error?.message || 'Unknown error.'}` };
+
+    } catch (error) {
+        return { success: false, message: error instanceof Error ? error.message : String(error) };
+    }
+}
+
+
+async function validateAnthropic(apiKey: string): Promise<ValidationResult> {
+    const url = 'https://api.anthropic.com/v1/messages';
+    const options = {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+            model: 'claude-3-haiku-20240307',
+            messages: [{ role: 'user', content: 'test' }],
+            max_tokens: 1
+        }),
+    };
+    
+    try {
+        const { response, body } = await performValidationRequest(url, options);
+
+        if (response.ok) {
+            return { success: true };
+        }
+
+        if (response.status === 401) {
+            return { success: false, message: `Authentication failed. The API key is incorrect. (${body?.error?.type || ''})` };
+        }
+        
+        if (response.status === 403) {
+            return { success: false, message: `Permission Denied. The API key may be disabled. (${body?.error?.type || ''})` };
+        }
+
+        if (response.status === 429) {
+            return { success: false, message: `Rate limit exceeded. Please check your Anthropic account. (${body?.error?.type || ''})` };
+        }
+
+        return { success: false, message: `Validation failed. Status: ${response.status}. Message: ${body?.error?.message || 'Unknown error.'}` };
+
+    } catch (error) {
+        return { success: false, message: error instanceof Error ? error.message : String(error) };
+    }
+}
+
+
+async function validateOpenRouter(apiKey: string, models: string[] = []): Promise<ValidationResult> {
+    const url = 'https://openrouter.ai/api/v1/chat/completions';
+    // Use a very cheap/free model for validation if none are provided
+    const modelToTest = models.length > 0 ? models[0] : 'mistralai/mistral-7b-instruct:free';
+    
+    const options = {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+            'HTTP-Referer': 'https://orchestrator.ai',
+            'X-Title': 'Orchestrator AI',
+        },
+        body: JSON.stringify({
+            model: modelToTest,
+            messages: [{ role: 'user', content: 'test' }],
+            max_tokens: 1
+        }),
+    };
+
+    try {
+        const { response, body } = await performValidationRequest(url, options);
+        
+        if (response.ok) {
+            return { success: true };
+        }
+
+        if (response.status === 401) {
+            return { success: false, message: `Authentication failed. The API key is incorrect. (${body?.error?.code || ''})` };
+        }
+        
+        if (response.status === 402) {
+             return { success: false, message: `Payment Required. You may be out of credits on OpenRouter. (${body?.error?.code || ''})` };
+        }
+
+        if (response.status === 429) {
+            return { success: false, message: `Rate limit exceeded. Please check your OpenRouter account. (${body?.error?.code || ''})` };
+        }
+
+        return { success: false, message: `Validation failed. Status: ${response.status}. Message: ${body?.error?.message || 'Unknown error.'}` };
+        
+    } catch (error) {
+        return { success: false, message: error instanceof Error ? error.message : String(error) };
+    }
+}
+
+
+export const validateApiKey = async (config: AiConfig): Promise<ValidationResult> => {
+    const { provider, apiKey, models } = config;
+    if (!apiKey || apiKey.trim() === '') {
+        return { success: false, message: 'API Key cannot be empty.' };
+    }
+
+    switch(provider) {
+        case 'gemini':
+            return validateGemini(apiKey);
+        case 'openai':
+            return validateOpenAI(apiKey);
+        case 'anthropic':
+            return validateAnthropic(apiKey);
+        case 'openrouter':
+            return validateOpenRouter(apiKey, models);
+        default:
+            return { success: false, message: 'Unsupported AI provider selected for validation.' };
     }
 };
